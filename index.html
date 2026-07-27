@@ -283,7 +283,7 @@
         클릭 또는 파일 드래그
         <small>SMBS 다운로드 파일 그대로 사용 가능</small>
       </div>
-      <input type="file" id="rateFile" accept=".xlsx,.xls" style="display:none;" onchange="handleRateFile(event)">
+      <input type="file" id="rateFile" accept=".xlsx,.xls,.htm,.html" style="display:none;" onchange="handleRateFile(event)">
       <div id="rateStatus" class="status-bar"></div>
       <div class="hint-box">A열: 날짜 &nbsp;|&nbsp; B열: 통화명 &nbsp;|&nbsp; C열: 매매기준율 자동 인식</div>
     </div>
@@ -442,9 +442,26 @@ function setupDrop(zoneId, handler) {
 function parseXlsx(file, cb) {
   const r = new FileReader();
   r.onload = e => {
+    // Excel "웹 페이지(프레임셋)" 껍데기 감지: 실제 데이터가 .files 폴더에 분리 저장된 파일
+    const head = String(e.target.result).slice(0, 3000);
+    if (/Excel Workbook Frameset|WorksheetSource\s+HRef|<frameset/i.test(head)) {
+      alert('이 파일은 데이터가 없는 껍데기(프레임셋) 파일입니다.\n\n' +
+            '원본 파일을 Excel에서 열었다가 저장하면 데이터가 별도 폴더(파일명.files\\sheet001.htm)로 분리됩니다.\n\n' +
+            '해결 방법:\n' +
+            '① 다시 다운로드한 원본을 열지 말고 그대로 업로드, 또는\n' +
+            '② Excel에서 "다른 이름으로 저장 → Excel 통합 문서(.xlsx)"로 저장 후 업로드, 또는\n' +
+            '③ 같은 위치의 "파일명.files" 폴더 안 sheet001.htm 파일을 업로드');
+      return;
+    }
     try {
       const wb = XLSX.read(e.target.result, { type:'binary', cellDates:true });
-      cb(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1 }));
+      // SMBS 파일은 요약 테이블 추가로 시트가 2개 이상 생성됨 → 전 시트 병합
+      let rows = [];
+      wb.SheetNames.forEach(sn => {
+        rows = rows.concat(XLSX.utils.sheet_to_json(wb.Sheets[sn], { header:1 }));
+      });
+      if (rows.length <= 1) throw new Error('empty');
+      cb(rows);
     } catch(err) {
       const parser = new DOMParser();
       const doc = parser.parseFromString(e.target.result, 'text/html');
@@ -453,9 +470,11 @@ function parseXlsx(file, cb) {
         const cells = tr.querySelectorAll('td');
         if (cells.length < 3) return;
         const dt = cells[0].textContent.trim();
-        if (/^\d{4}\.\d{2}\.\d{2}$/.test(dt)) {
+        const m = dt.match(/^(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})$/);
+        if (m) {
+          const iso = `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
           const rv = parseFloat(cells[2].textContent.trim().replace(/[,\s]/g,''));
-          if (!isNaN(rv) && rv > 0) rows.push([dt.replace(/\./g,'-'), cells[1].textContent.trim(), rv]);
+          if (!isNaN(rv) && rv > 0) rows.push([iso, cells[1].textContent.trim(), rv]);
         }
       });
       if (rows.length > 1) cb(rows); else alert('파일을 읽을 수 없습니다.');
