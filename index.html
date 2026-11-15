@@ -103,8 +103,8 @@
   input[readonly] { background: var(--bg); cursor: default; }
 
   /* Lot rows */
-  .lot-header { display: grid; grid-template-columns: 1fr 1fr 36px; gap: 8px; margin-bottom: 6px; }
-  .lot-row { display: grid; grid-template-columns: 1fr 1fr 36px; gap: 8px; margin-bottom: 8px; align-items: center; }
+  .lot-header { display: grid; grid-template-columns: 1fr 1fr 1fr 36px; gap: 8px; margin-bottom: 6px; }
+  .lot-row { display: grid; grid-template-columns: 1fr 1fr 1fr 36px; gap: 8px; margin-bottom: 8px; align-items: center; }
   .unit-wrap { position: relative; }
   .unit-wrap input { padding-right: 44px; }
   .unit-tag {
@@ -256,10 +256,11 @@
 
   <!-- STEP 1: 기초 재고 -->
   <div class="card">
-    <div class="card-title"><span class="step-badge">1</span> 기초 외화 재고</div>
+    <div class="card-title"><span class="step-badge">1</span> 기초 외화 재고 <span style="font-weight:400; text-transform:none; letter-spacing:0; font-size:12px; color:var(--text-hint);">전기 이월(2025년 말 외화 수량 + 원화 장부가액) · 환율 또는 원화금액 중 하나만 입력하면 나머지는 자동 계산</span></div>
     <div class="lot-header">
       <div class="field-label" style="margin:0;">수량 (USD)</div>
       <div class="field-label" style="margin:0;">취득 환율 (KRW/USD)</div>
+      <div class="field-label" style="margin:0;">원화금액 (KRW) — 장부가액</div>
       <div></div>
     </div>
     <div id="lotRows"></div>
@@ -397,25 +398,55 @@
 
   </div><!-- /resultSection -->
 
-  <div class="footer">외환 선입선출(FIFO) 관리 도구 · ver 2.5 · 수정일 2026.11.16</div>
+  <div class="footer">외환 선입선출(FIFO) 관리 도구 · ver 2.6 · 수정일 2026.11.16</div>
 </div>
 
 <script>
 let bankData = null, rateData = [], lots = [], warehouse = [], calcDone = false, fifoBookVal = 0, calcResults = [];
 let lastBasis = '';
+const LOT_DIV = 1; // 환율 단위: 1 (USD당) / 100 (100엔당)
 
 function fmt(n) { return Math.round(n).toLocaleString('ko-KR'); }
 function fmtUsd(n) { return (+n).toLocaleString('ko-KR', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
 /* ── LOT 관리 ── */
+function lotKrw(amt, rate) { return amt / LOT_DIV * rate; }
+// 화면에 입력된 값을 상태(lots)로 되돌려 저장 — Lot 추가/삭제 시 입력값이 지워지지 않도록
+function syncLots() {
+  const rows = document.querySelectorAll('.lot-row');
+  if (rows.length !== lots.length) return;
+  rows.forEach((row, i) => {
+    lots[i].amt = row.querySelector('.lot-amt').value;
+    lots[i].rate = row.querySelector('.lot-rate').value;
+    lots[i].krw = row.querySelector('.lot-krw').value;
+    lots[i].src = row.dataset.src || 'rate';
+  });
+}
 function addLot(amt='', rate='') {
-  lots.push({ id: Date.now() + Math.random() * 1000 | 0, amt, rate });
+  syncLots();
+  lots.push({ id: Date.now() + Math.random() * 1000 | 0, amt, rate, krw: '', src: 'rate' });
   renderLots();
 }
 function removeLot(id) {
   if (lots.length <= 1) return;
+  syncLots();
   lots = lots.filter(l => l.id !== id);
   renderLots();
+}
+// 환율 ↔ 원화금액 상호 계산 (마지막으로 입력한 쪽이 기준)
+function lotEdited(el, field) {
+  const row = el.closest('.lot-row');
+  const a = parseFloat(row.querySelector('.lot-amt').value);
+  const rateEl = row.querySelector('.lot-rate'), krwEl = row.querySelector('.lot-krw');
+  if (field === 'krw') row.dataset.src = 'krw';
+  else if (field === 'rate') row.dataset.src = 'rate';
+  if (row.dataset.src === 'krw') {
+    const k = parseFloat(krwEl.value);
+    if (field !== 'rate') rateEl.value = (a > 0 && k > 0) ? +(k * LOT_DIV / a).toFixed(6) : '';
+  } else {
+    const r = parseFloat(rateEl.value);
+    if (field !== 'krw') krwEl.value = (a > 0 && r > 0) ? Math.round(lotKrw(a, r)) : '';
+  }
 }
 function renderLots() {
   const c = document.getElementById('lotRows');
@@ -423,14 +454,21 @@ function renderLots() {
   lots.forEach(l => {
     const d = document.createElement('div');
     d.className = 'lot-row';
+    d.dataset.src = l.src || 'rate';
+    const a = parseFloat(l.amt), r = parseFloat(l.rate);
+    const krwVal = (l.src === 'krw' && l.krw !== '' && l.krw != null) ? l.krw : ((a > 0 && r > 0) ? Math.round(lotKrw(a, r)) : '');
     d.innerHTML = `
       <div class="unit-wrap">
-        <input type="number" step="0.01" min="0" placeholder="수량" class="lot-amt" value="${l.amt}">
+        <input type="number" step="0.01" min="0" placeholder="수량" class="lot-amt" value="${l.amt}" oninput="lotEdited(this,'amt')">
         <span class="unit-tag">USD</span>
       </div>
       <div class="unit-wrap">
-        <input type="number" step="0.01" min="0" placeholder="환율" class="lot-rate" value="${l.rate}">
+        <input type="number" step="0.01" min="0" placeholder="환율" class="lot-rate" value="${l.rate}" oninput="lotEdited(this,'rate')">
         <span class="unit-tag">KRW</span>
+      </div>
+      <div class="unit-wrap">
+        <input type="number" step="1" min="0" placeholder="원화금액" class="lot-krw" value="${krwVal}" oninput="lotEdited(this,'krw')">
+        <span class="unit-tag">원</span>
       </div>
       <button class="btn btn-del" onclick="removeLot(${l.id})">×</button>`;
     c.appendChild(d);
@@ -623,7 +661,9 @@ function runCalc() {
   warehouse = [];
   document.querySelectorAll('.lot-row').forEach(row => {
     const a = parseFloat(row.querySelector('.lot-amt').value);
-    const r = parseFloat(row.querySelector('.lot-rate').value);
+    let r = parseFloat(row.querySelector('.lot-rate').value);
+    const k = parseFloat(row.querySelector('.lot-krw').value);
+    if (row.dataset.src === 'krw' && a > 0 && k > 0) r = k * LOT_DIV / a; // 원화금액 기준: 장부가액을 정확히 유지
     if (!isNaN(a) && !isNaN(r) && a > 0 && r > 0) warehouse.push({ amount: a, rate: r });
   });
 
