@@ -264,6 +264,9 @@
     </div>
     <div id="lotRows"></div>
     <button class="btn" onclick="addLot()" style="margin-top:4px; font-size:13px;">+ Lot 추가</button>
+    <button class="btn" onclick="document.getElementById('lotFile').click()" style="margin-top:4px; font-size:13px;">지난 분기 엑셀에서 불러오기</button>
+    <input type="file" id="lotFile" accept=".xlsx,.xls" style="display:none;" onchange="handleLotFile(event)">
+    <div id="lotStatus" class="status-bar"></div>
   </div>
 
   <!-- STEP 2+3: 파일 업로드 -->
@@ -285,11 +288,21 @@
       </div>
       <input type="file" id="rateFile" accept=".xlsx,.xls,.htm,.html" style="display:none;" onchange="handleRateFile(event)">
       <div id="rateStatus" class="status-bar"></div>
-      <div class="hint-box">A열: 날짜 &nbsp;|&nbsp; B열: 통화명 &nbsp;|&nbsp; C열: 매매기준율 자동 인식</div>
+      <div class="hint-box">열 제목(일자 · 통화 · 매매기준율) 기준으로 자동 인식</div>
     </div>
   </div>
 
   <!-- STEP 4: 계산 실행 -->
+  <div class="card">
+    <div class="card-title"><span class="step-badge">▸</span> 적용 환율 기준</div>
+    <label style="display:flex; gap:8px; align-items:center; margin-bottom:6px; cursor:pointer;">
+      <input type="radio" name="rateBasis" value="smbs" checked> SMBS 매매기준율 (3번 환율 파일, 거래일 기준)
+    </label>
+    <label style="display:flex; gap:8px; align-items:center; cursor:pointer;">
+      <input type="radio" name="rateBasis" value="file"> 거래내역 환율 (2번 파일의 '환율' 열 — 거래 시점 은행 적용 환율, 3번 파일 불필요)
+    </label>
+  </div>
+
   <div class="action-bar">
     <button class="btn btn-primary" onclick="runCalc()">계산 실행</button>
   </div>
@@ -384,11 +397,12 @@
 
   </div><!-- /resultSection -->
 
-  <div class="footer">외환 선입선출(FIFO) 관리 도구 · ver 2.0</div>
+  <div class="footer">외환 선입선출(FIFO) 관리 도구 · ver 2.5 · 수정일 2026.11.16</div>
 </div>
 
 <script>
 let bankData = null, rateData = [], lots = [], warehouse = [], calcDone = false, fifoBookVal = 0, calcResults = [];
+let lastBasis = '';
 
 function fmt(n) { return Math.round(n).toLocaleString('ko-KR'); }
 function fmtUsd(n) { return (+n).toLocaleString('ko-KR', {minimumFractionDigits:2, maximumFractionDigits:2}); }
@@ -415,7 +429,7 @@ function renderLots() {
         <span class="unit-tag">USD</span>
       </div>
       <div class="unit-wrap">
-        <input type="number" step="1" min="0" placeholder="환율" class="lot-rate" value="${l.rate}">
+        <input type="number" step="0.01" min="0" placeholder="환율" class="lot-rate" value="${l.rate}">
         <span class="unit-tag">KRW</span>
       </div>
       <button class="btn btn-del" onclick="removeLot(${l.id})">×</button>`;
@@ -425,6 +439,53 @@ function renderLots() {
 addLot();
 
 /* ── 날짜 유틸 ── */
+/* ── 지난 분기 엑셀(이 도구가 내보낸 '2.기말Lot잔액' 시트)에서 기초 Lot 불러오기 ── */
+const PAGE_CUR = 'USD';
+function handleLotFile(e) { const f = e.target.files[0]; if (f) loadLotFile(f); e.target.value = ''; }
+function loadLotFile(file) {
+  const st = document.getElementById('lotStatus');
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, { type:'binary' });
+      // 'Lot' 이름의 시트를 우선 탐색, 열 제목(잔여~ / 취득환율~)으로 위치 파악
+      const order = wb.SheetNames.slice().sort((a,b) => (/lot/i.test(b)?1:0) - (/lot/i.test(a)?1:0));
+      let found = null;
+      for (const sn of order) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header:1 });
+        for (let i = 0; i < Math.min(30, rows.length) && !found; i++) {
+          const cells = (rows[i] || []).map(c => String(c == null ? '' : c).replace(/\s/g,''));
+          const ia = cells.findIndex(c => c.startsWith('잔여'));
+          const ir = cells.findIndex(c => c.startsWith('취득환율'));
+          if (ia >= 0 && ir >= 0) found = { rows, i, ia, ir, cur: cells[ia].replace('잔여','').toUpperCase(), sn };
+        }
+        if (found) break;
+      }
+      if (!found) { alert('기말 Lot 시트를 찾지 못했습니다.\n"잔여USD/JPY"와 "취득환율" 열 제목이 있는 시트(2.기말Lot잔액)가 필요합니다.'); return; }
+      if (found.cur && found.cur !== PAGE_CUR) {
+        alert('이 파일의 Lot은 ' + found.cur + ' 입니다. ' + PAGE_CUR + ' 도구에는 ' + PAGE_CUR + ' 파일을 사용하세요.');
+        return;
+      }
+      const num = v => parseFloat(String(v == null ? '' : v).replace(/,/g,''));
+      const out = [];
+      for (let k = found.i + 1; k < found.rows.length; k++) {
+        const row = found.rows[k]; if (!row) continue;
+        if (String(row[0] == null ? '' : row[0]).replace(/\s/g,'') === '합계') continue;
+        const a = num(row[found.ia]), rt = num(row[found.ir]);
+        if (a > 0 && rt > 0) out.push({ a, rt });
+      }
+      if (!out.length) { alert('불러올 Lot이 없습니다 (잔여 수량이 0이거나 비어 있음).'); return; }
+      lots = out.map((o, i) => ({ id: Date.now() + i, amt: o.a, rate: o.rt }));
+      renderLots();
+      const tot = out.reduce((a, o) => a + o.a, 0);
+      let msg = '✓ ' + file.name + ' [' + found.sn + '] — Lot ' + out.length + '개, 합계 ' + tot.toLocaleString('ko-KR', {maximumFractionDigits:2}) + ' ' + PAGE_CUR + ' 불러옴';
+      if (out.every(o => Number.isInteger(o.rt))) msg += '\n※ 취득환율이 모두 정수입니다. 구버전 출력은 소수점이 반올림되어 있을 수 있으니 확인하세요.';
+      st.style.whiteSpace = 'pre-line'; st.style.color = '#059669'; st.textContent = msg;
+    } catch (err) { alert('엑셀을 읽지 못했습니다: ' + err.message); }
+  };
+  r.readAsBinaryString(file);
+}
+
 function getLocalDateStr(d) {
   if (!(d instanceof Date) || isNaN(d)) return null;
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -501,24 +562,40 @@ function handleRateFile(e) { if (e.target.files[0]) loadRateFile(e.target.files[
 function loadRateFile(file) {
   parseXlsx(file, raw => {
     const map = new Map();
+    const nrm = v => String(v == null ? '' : v).replace(/[\s ]/g,'');
+    const CUR_RE = /USD|미국|달러|DOLLAR/i;
+    // 열 제목으로 위치 파악 (시트가 여러 개로 병합돼도 제목 행을 만날 때마다 갱신). 제목이 없으면 A/B/C열로 대체
+    let cDate = 0, cCur = -1, cRate = 2, headerFound = false;
+    const entries = [];
     raw.forEach(row => {
-      if (!row || row.length < 3) return;
-      let d = row[0], dateObj = null;
-      if (typeof d === 'number' && d > 40000) {
-        try { const p = XLSX.SSF.parse_date_code(d); dateObj = new Date(p.y, p.m-1, p.d); } catch(e) {}
-      } else if (d instanceof Date) {
-        dateObj = d;
-      } else if (typeof d === 'string') {
-        const s = d.trim().replace(/\./g,'-');
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) dateObj = new Date(s);
+      if (!row || !Array.isArray(row)) return;
+      const cells = row.map(nrm);
+      const ri = cells.findIndex(c => c.includes('매매기준율') || c.includes('기준환율'));
+      if (ri >= 0 && !/^\d/.test(cells[ri])) {
+        headerFound = true; cRate = ri;
+        const di = cells.findIndex(c => /^(일자|날짜|고시일|기준일|적용일)/.test(c) || c === '일');
+        cDate = di >= 0 ? di : 0;
+        cCur = cells.findIndex(c => c.includes('통화'));
+        return;
       }
-      if (!dateObj) return;
-      const ds = getLocalDateStr(dateObj);
+      let d = row[cDate], ds = null;
+      if (typeof d === 'number' && d > 40000) {
+        try { const p = XLSX.SSF.parse_date_code(d); ds = getLocalDateStr(new Date(p.y, p.m-1, p.d)); } catch(e) {}
+      } else if (d instanceof Date) {
+        ds = getLocalDateStr(d);
+      } else if (typeof d === 'string') {
+        const m = d.match(/(\d{4})\D{0,2}(\d{1,2})\D{0,2}(\d{1,2})/);
+        if (m) ds = `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+      }
       if (!ds || ds < '2000-01-01') return;
-      // C열(index 2) = 매매기준율
-      const rv = parseFloat(String(row[2]||'').replace(/,/g,''));
-      if (!isNaN(rv) && rv > 100 && rv < 10000) map.set(ds, rv);
+      const rv = parseFloat(String(row[cRate] == null ? '' : row[cRate]).replace(/,/g,''));
+      if (!(rv > 100 && rv < 10000)) return;
+      const curCol = cCur >= 0 ? cCur : (headerFound ? -1 : 1);
+      entries.push({ ds, rv, cur: curCol >= 0 ? String(row[curCol] == null ? '' : row[curCol]) : '' });
     });
+    // 통화 열이 있고 대상 통화가 확인되면 해당 통화만 사용 (여러 통화가 섞인 파일 대비)
+    const matched = entries.filter(e => CUR_RE.test(e.cur));
+    (matched.length ? matched : entries).forEach(e => map.set(e.ds, e.rv));
     rateData = Array.from(map.entries()).map(([date,rate]) => ({date,rate})).sort((a,b) => a.date.localeCompare(b.date));
     const el = document.getElementById('rateDrop');
     el.classList.add('loaded');
@@ -538,7 +615,9 @@ setupDrop('rateDrop', loadRateFile);
 /* ── 계산 실행 ── */
 function runCalc() {
   if (!bankData) { alert('은행 거래 내역 파일을 업로드해 주세요.'); return; }
-  if (!rateData.length) { alert('환율 데이터 파일을 업로드해 주세요.'); return; }
+  const basis = (document.querySelector('input[name=rateBasis]:checked') || {}).value || 'smbs';
+  lastBasis = basis === 'file' ? '거래내역 환율(파일 환율 열)' : 'SMBS 매매기준율';
+  if (basis === 'smbs' && !rateData.length) { alert('환율 데이터 파일을 업로드해 주세요.\n(거래내역 파일의 환율 열을 쓰려면 "적용 환율 기준"에서 거래내역 환율을 선택하세요.)'); return; }
 
   // 기초 재고 수집
   warehouse = [];
@@ -548,19 +627,49 @@ function runCalc() {
     if (!isNaN(a) && !isNaN(r) && a > 0 && r > 0) warehouse.push({ amount: a, rate: r });
   });
 
-  // 은행 헤더 감지
-  const keywords = { date:['거래일','날짜','일자'], deposit:['맡기신','입금'], withdraw:['찾으신','출금'], desc:['적요','기재','내용'] };
-  let bankHeaderIdx = 0, colMap = {};
-  for (let i = 0; i < Math.min(50, bankData.length); i++) {
+  // 은행 헤더 감지 (날짜 열 + [입금/출금 열] 또는 [거래금액 + 거래종류/잔액 열], 상위 100행 탐색)
+  const norm = v => String(v == null ? '' : v).replace(/[\s ()\[\]（）_\-\/]/g,'').toLowerCase();
+  const keywords = {
+    date:['거래일시','거래일자','거래일','일자','날짜','처리일','date'],
+    time:['거래시간','시간','time'],
+    rate:['적용환율','환율','rate'],
+    cur:['통화','currency'],
+    deposit:['맡기신','입금','입고','대변','deposit','credit'],
+    withdraw:['찾으신','출금','출고','차변','withdraw','debit'],
+    amount:['거래금액','금액','amount'],
+    type:['거래종류','거래구분','구분','입출'],
+    balance:['예금잔액','잔액','잔고','balance'],
+    desc:['적요','기재','거래내용','내용','비고','memo','description']
+  };
+  const exclude = ['잔액','잔고','합계','누계','balance','대체','포지션'];
+  let bankHeaderIdx = -1, colMap = {};
+  for (let i = 0; i < Math.min(100, bankData.length); i++) {
     const row = bankData[i]; if (!row || !Array.isArray(row)) continue;
-    const matches = { date:[], deposit:[], withdraw:[], desc:[] };
-    row.forEach((cell, idx) => {
-      const s = String(cell).replace(/\s/g,'');
-      for (let k in keywords) if (keywords[k].some(kw => s.includes(kw))) matches[k].push(idx);
-    });
-    if (matches.date.length > 0 && (matches.deposit.length > 0 || matches.withdraw.length > 0)) {
-      bankHeaderIdx = i; for (let k in matches) colMap[k] = matches[k][0]; break;
+    const matches = { date:[], time:[], rate:[], cur:[], deposit:[], withdraw:[], amount:[], type:[], balance:[], desc:[] };
+    for (let idx = 0; idx < row.length; idx++) {
+      const h = norm(row[idx]); if (!h) continue;
+      for (const k in keywords) {
+        if (k !== 'balance' && exclude.some(x => h.includes(x))) continue;
+        if (keywords[k].some(kw => h.includes(kw))) matches[k].push(idx);
+      }
     }
+    const hasDW = matches.deposit.length > 0 || matches.withdraw.length > 0;
+    const hasAmt = matches.amount.length > 0 && (matches.type.length > 0 || matches.balance.length > 0);
+    if (matches.date.length > 0 && (hasDW || hasAmt)) {
+      bankHeaderIdx = i; for (const k in matches) colMap[k] = matches[k][0]; break;
+    }
+  }
+  const dumpRows = n => bankData.slice(0, n).map((r,i) => (i+1) + '행: ' + (Array.isArray(r) ? r.map(c => String(c == null ? '' : c).slice(0,14)).join(' | ') : '')).join('\n');
+  if (bankHeaderIdx < 0) {
+    alert('은행 거래내역에서 헤더를 찾지 못했습니다.\n\n' +
+          '[파일 앞부분]\n' + dumpRows(8) + '\n\n' +
+          '필요한 열: 거래일(일자/날짜) + 입금·출금 열, 또는 거래금액 + 거래종류(또는 예금잔액) 열');
+    return;
+  }
+  const dwMode = colMap.deposit != null || colMap.withdraw != null;
+  if (basis === 'file' && colMap.rate == null) {
+    alert('거래내역 파일에서 "환율" 열 제목을 찾지 못했습니다.\n\n[파일 앞부분]\n' + dumpRows(bankHeaderIdx + 2) + '\n\nSMBS 매매기준율 기준으로 계산하거나 파일의 열 제목을 확인하세요.');
+    return;
   }
 
   const ratesMap = {};
@@ -568,29 +677,116 @@ function runCalc() {
   const sortedRates = [...rateData];
   const firstRate = sortedRates[0]?.rate || 0;
 
-  const txns = bankData.slice(bankHeaderIdx+1).map(r => {
-    if (!r || !r[colMap.date]) return null;
-    let rawDate = r[colMap.date], dateObj;
-    if (rawDate instanceof Date) dateObj = rawDate;
-    else if (typeof rawDate === 'number') {
-      try { const p = XLSX.SSF.parse_date_code(rawDate); dateObj = new Date(p.y,p.m-1,p.d); } catch(e) { return null; }
-    } else dateObj = new Date(rawDate);
-    const d = getLocalDateStr(dateObj);
-    if (!d) return null;
-    return {
-      date: d,
-      in: parseFloat(String(r[colMap.deposit]||0).replace(/,/g,'')),
-      out: parseFloat(String(r[colMap.withdraw]||0).replace(/,/g,'')),
-      desc: String(r[colMap.desc]||'')
-    };
-  }).filter(t => t && t.date).sort((a,b) => a.date.localeCompare(b.date));
+  const toNum = v => {
+    if (typeof v === 'number') return v;
+    const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g,''));
+    return isNaN(n) ? 0 : n;
+  };
+  const hasNum = v => v != null && v !== '' && !isNaN(parseFloat(String(v).replace(/[^0-9.\-]/g,'')));
+  const toDateStr = v => {
+    if (v instanceof Date) return getLocalDateStr(v);
+    if (typeof v === 'number') {
+      try { const p = XLSX.SSF.parse_date_code(v); return getLocalDateStr(new Date(p.y, p.m-1, p.d)); } catch(e) { return null; }
+    }
+    const m = String(v == null ? '' : v).match(/(\d{4})\D{0,2}(\d{1,2})\D{0,2}(\d{1,2})/);
+    if (!m) return null;
+    return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  };
+  const p2 = n => String(n).padStart(2,'0');
+  const toTimeStr = v => {
+    if (v == null || v === '') return '';
+    if (v instanceof Date) return `${p2(v.getHours())}:${p2(v.getMinutes())}:${p2(v.getSeconds())}`;
+    if (typeof v === 'number') { const sec = Math.round((v % 1) * 86400); return `${p2(Math.floor(sec/3600))}:${p2(Math.floor(sec%3600/60))}:${p2(sec%60)}`; }
+    const m = String(v).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    return m ? `${p2(m[1])}:${m[2]}:${m[3] || '00'}` : '';
+  };
+
+  // 1) 원본 행 수집
+  let raw = [];
+  bankData.slice(bankHeaderIdx+1).forEach((r, idx) => {
+    if (!r || r[colMap.date] == null || r[colMap.date] === '') return;
+    const d = toDateStr(r[colMap.date]); if (!d) return;
+    const tm = toTimeStr(colMap.time != null ? r[colMap.time] : null) || toTimeStr(typeof r[colMap.date] === 'string' ? r[colMap.date] : null);
+    raw.push({
+      date: d, time: tm, idx,
+      desc: String(r[colMap.desc] == null ? '' : r[colMap.desc]),
+      typeTxt: colMap.type != null ? String(r[colMap.type] == null ? '' : r[colMap.type]) : '',
+      bal: (colMap.balance != null && hasNum(r[colMap.balance])) ? toNum(r[colMap.balance]) : null,
+      amt: colMap.amount != null ? toNum(r[colMap.amount]) : 0,
+      frate: colMap.rate != null ? toNum(r[colMap.rate]) : 0,
+      cur: colMap.cur != null ? String(r[colMap.cur] == null ? '' : r[colMap.cur]).trim() : '',
+      dep: colMap.deposit  != null ? toNum(r[colMap.deposit])  : 0,
+      wd:  colMap.withdraw != null ? toNum(r[colMap.withdraw]) : 0
+    });
+  });
+  // 통화 검증: 이 도구는 달러(USD) 전용 — 다른 통화 파일이면 중단 (환산 단위가 달라 결과가 틀어짐)
+  if (colMap.cur != null) {
+    const okRows = raw.filter(r => /USD/i.test(r.cur));
+    if (okRows.length === 0 && raw.length) {
+      alert('이 도구는 달러(USD) 전용입니다.\n거래내역 파일의 통화: ' + [...new Set(raw.map(r => r.cur))].join(', ') + '\n\n엔화용(fx-fifo-jpy) 도구를 사용하세요.');
+      return;
+    }
+    if (okRows.length < raw.length) alert('통화가 USD가 아닌 거래 ' + (raw.length - okRows.length) + '건은 제외했습니다.');
+    raw = okRows;
+  }
+  // 2) 날짜+시간 순 정렬 (같은 날 거래는 시간 순서가 선입선출에 영향)
+  raw.sort((a,b) => (a.date + ' ' + a.time).localeCompare(b.date + ' ' + b.time) || a.idx - b.idx);
+
+  // 3) 입금/출금 방향 판정
+  const undetermined = [];
+  let prevBal = null;
+  const txns = [];
+  raw.forEach(r => {
+    let inV = 0, outV = 0;
+    if (dwMode) { inV = r.dep; outV = r.wd; }
+    else if (r.amt > 0) {
+      let dir = null;
+      if (/입금|입고|이자|환입|수입|예치/.test(r.typeTxt)) dir = 'in';
+      else if (/지급|출금|출고|송금|인출|지출|해지/.test(r.typeTxt)) dir = 'out';
+      if (!dir && r.bal != null && prevBal != null) {
+        const diff = r.bal - prevBal;
+        if (Math.abs(diff - r.amt) < 0.005) dir = 'in';
+        else if (Math.abs(diff + r.amt) < 0.005) dir = 'out';
+      }
+      if (dir === 'in') inV = r.amt; else if (dir === 'out') outV = r.amt;
+      else undetermined.push(r.date + ' ' + r.time + ' ' + r.desc + ' ' + r.amt);
+    }
+    if (r.bal != null) prevBal = r.bal;
+    if (inV > 0 || outV > 0) txns.push({ date: r.date, time: r.time, in: inV, out: outV, desc: r.desc, bal: r.bal, frate: r.frate });
+  });
+  if (undetermined.length) alert('입금/출금 방향을 판정하지 못해 제외한 거래 ' + undetermined.length + '건:\n' + undetermined.slice(0,8).join('\n'));
+
+  // 4) 기초 잔액 교차검증: (첫 거래 후 예금잔액 - 첫 거래 증감) = 파일상 기초 잔액
+  const bs = document.getElementById('bankStatus');
+  bs.textContent = ''; bs.style.color = '';
+  if (txns.length && txns[0].bal != null) {
+    const openBal = txns[0].bal - (txns[0].in - txns[0].out);
+    const inputBal = warehouse.reduce((a,l) => a + l.amount, 0);
+    const fu = n => (+n).toLocaleString('ko-KR', {maximumFractionDigits:2});
+    if (Math.abs(openBal - inputBal) > 0.005) {
+      bs.textContent = '⚠ 파일상 기초 잔액 ' + fu(openBal) + ' vs 1번에 입력한 기초 재고 ' + fu(inputBal) + ' — 불일치. 1번 기초 재고(수량·취득환율)를 확인하세요.';
+      bs.style.color = '#d97706';
+    } else {
+      bs.textContent = '✓ 기초 재고가 파일상 기초 잔액(' + fu(openBal) + ')과 일치합니다.';
+      bs.style.color = '#059669';
+    }
+  }
+
+  if (txns.length === 0) {
+    const cn = i => i == null ? '(없음)' : (i+1) + '열';
+    alert('헤더는 찾았지만 읽을 거래가 0건입니다.\n\n' +
+          '인식된 열 → 날짜: ' + cn(colMap.date) + ', 입금: ' + cn(colMap.deposit) + ', 출금: ' + cn(colMap.withdraw) + ', 적요: ' + cn(colMap.desc) + '\n' +
+          '헤더 행: ' + (bankHeaderIdx+1) + '행\n\n[파일 앞부분]\n' + dumpRows(bankHeaderIdx + 4));
+    return;
+  }
 
   calcResults = [];
-  let totalIn = 0, totalCogs = 0;
+  let totalIn = 0, totalCogs = 0, shortage = 0, fileRateMissing = 0;
 
   txns.forEach(t => {
-    let rate = ratesMap[t.date];
+    let rate = (basis === 'file' && t.frate > 0) ? t.frate : ratesMap[t.date];
     if (rate === undefined) {
+      if (basis === 'file') fileRateMissing++;
       const past = sortedRates.filter(r => r.date <= t.date);
       rate = past.length > 0 ? past[past.length-1].rate : firstRate;
     }
@@ -607,11 +803,12 @@ function runCalc() {
         if (lot.amount <= rem) { outKrw += lot.amount * lot.rate; rem -= lot.amount; warehouse.shift(); }
         else { outKrw += rem * lot.rate; lot.amount -= rem; rem = 0; }
       }
+      if (rem > 0) shortage += rem;
       outKrw = Math.round(outKrw);
       totalCogs += outKrw;
     }
     const bal = Math.round(warehouse.reduce((a,l) => a + l.amount * l.rate, 0));
-    calcResults.push({ date:t.date, desc:t.desc, rate:Math.round(rate), inUsd:t.in||0, outUsd:t.out||0, inKrw, outKrw, bal });
+    calcResults.push({ date:t.date, desc:t.desc, rate, inUsd:t.in||0, outUsd:t.out||0, inKrw, outKrw, bal });
   });
 
   fifoBookVal = warehouse.reduce((a,l) => a + l.amount * l.rate, 0);
@@ -630,7 +827,7 @@ function runCalc() {
     tr.innerHTML = `
       <td>${r.date}</td>
       <td>${r.desc}</td>
-      <td style="text-align:right;">${r.rate.toLocaleString()}</td>
+      <td style="text-align:right;">${r.rate.toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
       <td class="${r.inUsd>0?'td-in':''}">${r.inUsd>0?fmtUsd(r.inUsd):''}</td>
       <td class="${r.outUsd>0?'td-out':''}">${r.outUsd>0?fmtUsd(r.outUsd):''}</td>
       <td class="${r.inKrw>0?'td-in':''}">${r.inKrw>0?fmt(r.inKrw):''}</td>
@@ -647,7 +844,7 @@ function runCalc() {
     tr.innerHTML = `
       <td>Lot ${i+1}</td>
       <td>${fmtUsd(l.amount)}</td>
-      <td>${fmt(l.rate)}</td>
+      <td>${l.rate.toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
       <td>${fmt(l.amount*l.rate)}</td>`;
     elb.appendChild(tr);
   });
@@ -656,6 +853,8 @@ function runCalc() {
   document.getElementById('cFifo').textContent = fmt(fifoBookVal) + ' 원';
   document.getElementById('resultSection').classList.add('show');
   calcDone = true;
+  if (fileRateMissing > 0) alert('거래내역 환율이 비어 있는 ' + fileRateMissing + '건은 SMBS 환율(직전 영업일 포함)로 대체했습니다.' + (rateData.length ? '' : '\n※ 3번 환율 파일이 없어 해당 건은 환율 0으로 계산됩니다.'));
+  if (shortage > 0) alert('출금 수량이 보유 Lot(기초+입금)을 ' + shortage.toLocaleString('ko-KR') + ' 초과했습니다.\n기초 외화 재고(1번)가 누락되었는지 확인하세요. 초과분은 원가 계산에서 제외됩니다.');
   calcCompare();
   document.getElementById('resultSection').scrollIntoView({ behavior:'smooth', block:'start' });
 }
@@ -697,13 +896,14 @@ function exportExcel() {
   const endUsd = parseFloat(document.getElementById('endUsd').value)||0;
   const endRate = parseFloat(document.getElementById('endRate').value)||0;
   const s2 = warehouse.map((l,i) => ({
-    'Lot': i+1, '잔여USD': l.amount, '취득환율': Math.round(l.rate), '원화가치': Math.round(l.amount*l.rate)
+    'Lot': i+1, '잔여USD': l.amount, '취득환율': l.rate, '원화가치': Math.round(l.amount*l.rate)
   }));
   s2.push({ 'Lot':'합계', '잔여USD': endUsd, '취득환율':'', '원화가치': Math.round(fifoBookVal) });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(s2), '2.기말Lot잔액');
 
   // 시트3: 기말 비교
   const s3 = [
+    { '항목':'적용환율 기준', '금액': lastBasis },
     { '항목':'FIFO 장부 잔액(KRW)', '금액': Math.round(fifoBookVal) },
     { '항목':'기말환율 단순환산(KRW)', '금액': endRate ? Math.round(endUsd*endRate) : '' },
     { '항목':'차이(외화환산손익)', '금액': endRate ? Math.round(endUsd*endRate - fifoBookVal) : '' },
